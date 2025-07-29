@@ -46,6 +46,7 @@ from bs4 import BeautifulSoup
 import pandas as pd
 from pandas import ExcelWriter
 from openpyxl.drawing.image import Image as XLImage
+import openpyxl  # used for column letter conversion
 
 
 def fetch_html_from_url(url: str) -> Optional[str]:
@@ -201,14 +202,33 @@ def run_accessibility_checks(html: str) -> List[Dict[str, str]]:
     return issues
 
 
-def write_report(issues: List[Dict[str, str]], output_path: str, logo_path: str) -> None:
-    """Write the collected issues to an Excel spreadsheet with branding.
+def write_report(issues: List[Dict[str, str]], output_path: str, logo_path: str,
+                 url: Optional[str] = None) -> None:
+    """Write the collected issues to an Excel spreadsheet with branding and a summary sheet.
+
+    The generated workbook contains two sheets:
+
+    * ``Status`` – a high‑level overview for the scanned URL showing the count of
+      issues by rule and a pass/fail status for each category.  The header row
+      is styled with a coloured fill similar to the provided example file.  If
+      a category has zero issues, it is marked ``Pass`` and coloured green.
+      Otherwise it is marked ``Fail`` and coloured red.  The total number of
+      issues is also reported.
+    * ``Issues`` – a detailed listing of every issue found.  The header row is
+      styled with a different background colour to separate it visually from
+      the data rows.  Columns include the rule name, WCAG principle,
+      success criterion, level, description, context, selector and
+      recommendation.
 
     Args:
-        issues: List of issue dictionaries.
-        output_path: Path for the Excel file.
-        logo_path: Path to the logo image.
+        issues: List of issue dictionaries collected from the scan.
+        output_path: Path for the Excel file to be created.
+        logo_path: Path to the Perspective Tester logo image used for branding.
+        url: The URL that was scanned.  If provided, it will be displayed on
+            the summary sheet.  When scanning a local file, this may be
+            omitted.
     """
+    # Organise the issues into a DataFrame for convenience
     df = pd.DataFrame(issues)
     expected_cols = [
         'rule',
@@ -224,33 +244,134 @@ def write_report(issues: List[Dict[str, str]], output_path: str, logo_path: str)
         if col not in df.columns:
             df[col] = ''
     df = df[expected_cols]
-    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        start_row = 7
-        df.to_excel(writer, sheet_name='Report', index=False, startrow=start_row)
-        workbook = writer.book
-        worksheet = writer.sheets['Report']
-        # Insert logo if provided
-        if os.path.isfile(logo_path):
-            try:
-                img = XLImage(logo_path)
-                img.width = 200
-                img.height = 80
-                worksheet.add_image(img, 'A1')
-            except Exception as exc:
-                print(f"Could not insert logo: {exc}")
-        # Title and summary
-        worksheet['A4'] = 'WCAG Accessibility Scan Report'
-        worksheet['A5'] = f'Total issues found: {len(issues)}'
+
+    # Determine counts per rule for the summary
+    rule_counts = {
+        'Missing Alt Text': int((df['rule'] == 'IMG_ALT').sum()),
+        'Unlabelled Form Controls': int((df['rule'] == 'FORM_LABEL').sum()),
+        'Generic Link Text': int((df['rule'] == 'LINK_TEXT').sum()),
+    }
+
+    total_issues = len(issues)
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
+    wb = Workbook()
+    # Summary sheet
+    ws_summary = wb.active
+    ws_summary.title = 'Status'
+
+    # Insert logo on summary sheet
+    if logo_path and os.path.isfile(logo_path):
         try:
-            worksheet['A4'].font = worksheet['A4'].font.copy(bold=True)
-            worksheet['A5'].font = worksheet['A5'].font.copy(italic=True)
+            img = XLImage(logo_path)
+            # Resize to fit nicely at the top left
+            img.width = 200
+            img.height = 80
+            ws_summary.add_image(img, 'A1')
+        except Exception as exc:
+            print(f"Could not insert logo: {exc}")
+
+    # Header for summary table
+    header = ['URL', 'Missing Alt Text', 'Unlabelled Form Controls', 'Generic Link Text', 'Total Issues']
+    ws_summary.append([])  # leave first row (logo)
+    ws_summary.append([])
+    ws_summary.append([])
+    start_row = ws_summary.max_row + 1
+
+    # Apply styling to header row (light fill and bold)
+    header_fill = PatternFill(fill_type='solid', fgColor='FFE6B8AF')  # pale peach similar to sample
+    # Define a thin border to apply around each cell, similar to the example file
+    thin = Side(border_style="thin", color="000000")
+    thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for col_idx, col_name in enumerate(header, start=1):
+        cell = ws_summary.cell(row=start_row, column=col_idx, value=col_name)
+        cell.font = Font(bold=True, size=11)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.fill = header_fill
+        cell.border = thin_border
+
+    # Data row for summary
+    url_display = url or 'N/A'
+    data = [url_display, rule_counts['Missing Alt Text'], rule_counts['Unlabelled Form Controls'],
+            rule_counts['Generic Link Text'], total_issues]
+    # Create data row immediately following the header
+    data_row_index = start_row + 1
+    # Fill URL cell
+    url_cell = ws_summary.cell(row=data_row_index, column=1)
+    url_cell.value = url_display
+    url_cell.alignment = Alignment(horizontal='left', vertical='center')
+    url_cell.border = thin_border
+    # Style data row: determine pass/fail for each rule count and assign colours
+    pass_fill = PatternFill(fill_type='solid', fgColor='FF92D050')  # light green
+    fail_fill = PatternFill(fill_type='solid', fgColor='FFFFC000')  # light amber
+    rule_values = [rule_counts['Missing Alt Text'], rule_counts['Unlabelled Form Controls'], rule_counts['Generic Link Text']]
+    for idx, value in enumerate(rule_values, start=2):
+        cell = ws_summary.cell(row=data_row_index, column=idx)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = thin_border
+        if value == 0:
+            cell.value = 'Pass'
+            cell.fill = pass_fill
+        else:
+            cell.value = 'Fail'
+            cell.fill = fail_fill
+    # Total issues cell
+    tot_cell = ws_summary.cell(row=data_row_index, column=len(header))
+    tot_cell.value = total_issues
+    tot_cell.alignment = Alignment(horizontal='center', vertical='center')
+    tot_cell.border = thin_border
+
+    # Adjust column widths based on header length
+    for col_idx, col_name in enumerate(header, start=1):
+        ws_summary.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(15, len(col_name) + 5)
+
+    # Detailed issues sheet
+    ws_details = wb.create_sheet('Issues')
+    # Insert logo again on details sheet to mirror sample aesthetic
+    if logo_path and os.path.isfile(logo_path):
+        try:
+            img2 = XLImage(logo_path)
+            img2.width = 200
+            img2.height = 80
+            ws_details.add_image(img2, 'A1')
         except Exception:
             pass
-        # Adjust column widths
-        for col_idx, col_name in enumerate(expected_cols, start=1):
-            sample_values = df[col_name].astype(str).head(50)
-            max_len = max(len(col_name), max(sample_values.apply(len))) if not sample_values.empty else len(col_name)
-            worksheet.column_dimensions[chr(ord('A') + col_idx - 1)].width = min(max_len + 5, 60)
+    # Leave a couple of blank rows under the logo
+    ws_details.append([])
+    ws_details.append([])
+    # Write header row for issues table
+    issue_header_fill = PatternFill(fill_type='solid', fgColor='FFD9E2F3')  # light purple similar to example
+    # Create header row for details sheet
+    ws_details.append(expected_cols)
+    header_row = ws_details.max_row
+    for col_idx, col_name in enumerate(expected_cols, start=1):
+        cell = ws_details.cell(row=header_row, column=col_idx)
+        cell.font = Font(bold=True, size=11)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.fill = issue_header_fill
+        cell.border = thin_border
+    # Append issue rows
+    for _, row in df.iterrows():
+        ws_details.append(list(row))
+    # Style issue rows (borders and alignment)
+    for row_idx in range(header_row + 1, ws_details.max_row + 1):
+        for col_idx in range(1, len(expected_cols) + 1):
+            cell = ws_details.cell(row=row_idx, column=col_idx)
+            # Left align for most columns, except maybe the first numeric ones center align
+            if col_idx == 1:
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            else:
+                cell.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+            cell.border = thin_border
+    # Adjust column widths for details sheet
+    for col_idx, col_name in enumerate(expected_cols, start=1):
+        series = df[col_name].astype(str).head(50)
+        max_len = max(len(str(col_name)), max(series.apply(len)) if not series.empty else 0)
+        ws_details.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = min(max_len + 5, 50)
+
+    wb.save(output_path)
 
 
 def main() -> None:
@@ -270,7 +391,9 @@ def main() -> None:
         print('No HTML content was retrieved. Exiting.')
         return
     issues = run_accessibility_checks(html)
-    write_report(issues, args.output, args.logo)
+    # Use the URL or filename for the summary sheet if provided
+    summary_identifier: Optional[str] = args.url if args.url else args.file
+    write_report(issues, args.output, args.logo, url=summary_identifier)
     print(f'Report generated: {args.output} ({len(issues)} issues found)')
 
 
