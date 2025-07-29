@@ -113,7 +113,9 @@ class WCAGRequestHandler(BaseHTTPRequestHandler):
             timestamp = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
             report_name = f'report_{timestamp}.xlsx'
             tmp_path = os.path.join('/tmp', report_name)
-            write_report(issues, tmp_path, LOGO_PATH)
+            # Provide the URL or file path to write_report so it can be shown in the summary sheet
+            summary_id = url if url else file_path
+            write_report(issues, tmp_path, LOGO_PATH, url=summary_id)
             disposition = f'attachment; filename="{report_name}"'
             self._serve_file(tmp_path,
                              content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -176,7 +178,9 @@ class WCAGRequestHandler(BaseHTTPRequestHandler):
         timestamp = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
         report_name = f'report_{timestamp}.xlsx'
         tmp_path = os.path.join('/tmp', report_name)
-        write_report(issues, tmp_path, LOGO_PATH)
+        # Provide the URL or file path to write_report so it can be shown in the summary sheet
+        summary_id = url if url else file_path
+        write_report(issues, tmp_path, LOGO_PATH, url=summary_id)
         # Serve the file back to the client
         disposition = f'attachment; filename="{report_name}"'
         self._serve_file(tmp_path,
